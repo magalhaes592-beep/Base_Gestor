@@ -1,6 +1,6 @@
 import streamlit as st
+import pymssql
 import pandas as pd
-import pyodbc
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
@@ -66,7 +66,7 @@ def _f(v) -> float:
     except: return 0.0
 
 # ─────────────────────────────────────────────
-#  Conexão com Banco de Dados (ODBC / Protheus)
+#  Conexão com Banco de Dados (pymssql / Protheus)
 # ─────────────────────────────────────────────
 def get_db_credentials():
     secrets_db = st.secrets.get("database", {}) if hasattr(st, "secrets") else {}
@@ -76,18 +76,18 @@ def get_db_credentials():
         "database": secrets_db.get("database", "CLEZM5_199407_PR_PD"),
         "user": secrets_db.get("user", "CLT199407readPrime"),
         "password": secrets_db.get("password", ""),
-        "driver": secrets_db.get("driver", "ODBC Driver 17 for SQL Server")
     }
 
 def get_connection(cfg: dict):
-    conn_str = (
-        f"DRIVER={{{cfg['driver']}}};"
-        f"SERVER={cfg['host']},{cfg['port']};"
-        f"DATABASE={cfg['database']};"
-        f"UID={cfg['user']};PWD={cfg['password']};"
-        f"TrustServerCertificate=yes;Connection Timeout=20;"
+    return pymssql.connect(
+        server=cfg['host'],
+        port=int(cfg['port']),
+        database=cfg['database'],
+        user=cfg['user'],
+        password=cfg['password'],
+        charset='cp1252',
+        autocommit=True
     )
-    return pyodbc.connect(conn_str, autocommit=True)
 
 # ─────────────────────────────────────────────
 #  Carregamento de Filtros Dinâmicos (Cacheado)
@@ -224,40 +224,40 @@ def fetch_data(cfg, anos_list, meses_list, resps, za_tipos, za_tipocoms, ccs, co
             for mes in meses_list:
                 m_num = int(mes)
                 last_day = calendar.monthrange(int(ano), m_num)[1]
-                mes_clauses.append("CT2.CT2_DATA BETWEEN ? AND ?")
+                mes_clauses.append("CT2.CT2_DATA BETWEEN %s AND %s")
                 date_params += [f"{ano}{mes}01", f"{ano}{mes}{last_day:02d}"]
         date_condition = "(" + " OR ".join(mes_clauses) + ")"
     else:
-        date_condition = "CT2.CT2_DATA BETWEEN ? AND ?"
+        date_condition = "CT2.CT2_DATA BETWEEN %s AND %s"
         date_params = [f"{min(anos_list)}0101", f"{max(anos_list)}1231"]
 
     if resps:
-        resp_filter = " OR ".join(f"(SZA_D.ZA_NOMUSER LIKE ? OR SZA_C.ZA_NOMUSER LIKE ?)" for _ in resps)
+        resp_filter = " OR ".join(f"(SZA_D.ZA_NOMUSER LIKE %s OR SZA_C.ZA_NOMUSER LIKE %s)" for _ in resps)
         resp_params = []
         for r in resps: resp_params.extend([f"%{r}%", f"%{r}%"])
     else:
         resp_filter = "1=1"; resp_params = []
 
     if za_tipos:
-        zatipo_filter = f"AND (SZA_D.ZA_TIPO IN ({','.join('?'*len(za_tipos))}) OR SZA_C.ZA_TIPO IN ({','.join('?'*len(za_tipos))}))"
+        zatipo_filter = f"AND (SZA_D.ZA_TIPO IN ({','.join(['%s']*len(za_tipos))}) OR SZA_C.ZA_TIPO IN ({','.join(['%s']*len(za_tipos))}))"
         zatipo_params = list(za_tipos) * 2
     else:
         zatipo_filter = ""; zatipo_params = []
 
     if za_tipocoms:
-        zatipocom_filter = f"AND (SZA_D.ZA_TIPOCOM IN ({','.join('?'*len(za_tipocoms))}) OR SZA_C.ZA_TIPOCOM IN ({','.join('?'*len(za_tipocoms))}))"
+        zatipocom_filter = f"AND (SZA_D.ZA_TIPOCOM IN ({','.join(['%s']*len(za_tipocoms))}) OR SZA_C.ZA_TIPOCOM IN ({','.join(['%s']*len(za_tipocoms))}))"
         zatipocom_params = list(za_tipocoms) * 2
     else:
         zatipocom_filter = ""; zatipocom_params = []
 
     if ccs:
-        cc_filter = f"AND (CT2.CT2_CCD IN ({','.join('?'*len(ccs))}) OR CT2.CT2_CCC IN ({','.join('?'*len(ccs))}))"
+        cc_filter = f"AND (CT2.CT2_CCD IN ({','.join(['%s']*len(ccs))}) OR CT2.CT2_CCC IN ({','.join(['%s']*len(ccs))}))"
         cc_params = list(ccs) * 2
     else:
         cc_filter = ""; cc_params = []
 
     if contas:
-        conta_filter = f"AND (CT2.CT2_DEBITO IN ({','.join('?'*len(contas))}) OR CT2.CT2_CREDIT IN ({','.join('?'*len(contas))}))"
+        conta_filter = f"AND (CT2.CT2_DEBITO IN ({','.join(['%s']*len(contas))}) OR CT2.CT2_CREDIT IN ({','.join(['%s']*len(contas))}))"
         conta_params = list(contas) * 2
     else:
         conta_filter = ""; conta_params = []
@@ -271,13 +271,12 @@ def fetch_data(cfg, anos_list, meses_list, resps, za_tipos, za_tipocoms, ccs, co
         zatipocom_filter=zatipocom_filter
     )
 
-    all_params = date_params + resp_params + zatipo_params + zatipocom_params + cc_params + conta_params
+    all_params = tuple(date_params + resp_params + zatipo_params + zatipocom_params + cc_params + conta_params)
     
     conn = get_connection(cfg)
-    cur = conn.cursor()
+    cur = conn.cursor(as_dict=True)
     cur.execute(sql, all_params)
-    cols = [d[0] for d in cur.description]
-    all_rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+    all_rows = cur.fetchall()
     conn.close()
 
     if search_str:
@@ -391,7 +390,7 @@ with st.sidebar.expander("⚙️ Conexão com Banco de Dados"):
     cfg_pwd  = st.text_input("Senha", value=db_cfg["password"], type="password")
     active_cfg = {
         "host": cfg_host, "port": cfg_port, "database": cfg_db,
-        "user": cfg_user, "password": cfg_pwd, "driver": db_cfg["driver"]
+        "user": cfg_user, "password": cfg_pwd
     }
 
 try:
